@@ -5,3 +5,5 @@ authors = ["Yilin Chen <sticnarf@gmail.com>"]
 edition = "2018"
 
 [dependencies]
+crossbeam-epoch = "0.8.2"
+static_assertions = "1.1.0"
