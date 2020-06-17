@@ -204,50 +204,35 @@ fn restart_when_needed<T>(mut f: impl FnMut() -> Result<T, NeedRestart>) -> T {
 mod tests {
     use super::*;
     use crossbeam_epoch::pin;
+    use rand::prelude::*;
     use std::collections::HashMap;
 
     #[test]
-    fn small() {
+    fn single_thread() {
+        let mut rng = StdRng::seed_from_u64(114514);
         let tree = Tree::new();
-        let guard = pin();
-        tree.insert(b"def", 1, &guard);
-        tree.insert(b"abc", 2, &guard);
-        assert_eq!(tree.get(b"cde", &guard), None);
-        assert_eq!(tree.get(b"abc", &guard), Some(&2));
-        assert_eq!(tree.get(b"def", &guard), Some(&1));
-    }
-
-    #[test]
-    fn big() {
-        let tree = Tree::new();
-        let guard = pin();
-
-        let mut buf = [0; 16];
-        let mut idx = 0;
-        let mut v = 0;
         let mut ans = HashMap::new();
-        for i in 0..13 {
-            for j in 0..7 {
-                for k in 0..10 {
-                    idx = (idx + i * j) % 16;
-                    v = (v + i + j) % 128;
-                    buf[idx] = v as u8;
-                    tree.insert(&buf, k, &guard);
-                    ans.insert(buf.clone(), k);
-                }
+        let mut buf = [0u8; 1024];
+        for _ in 0..10_000 {
+            let base = (2.0f64.ln() / 32.0).exp();
+            let len = (rng.next_u32() as f64).log(base) as usize;
+            rng.fill_bytes(&mut buf[..len]);
+            let value = rng.next_u32();
+
+            ans.insert(buf[..len].to_vec(), value);
+            if value % 2 == 0 {
+                let guard = pin();
+                tree.insert(&buf[..len], value, &guard);
             }
         }
-        let mut buf = [0; 16];
-        let mut idx = 0;
-        let mut v = 0;
-        for i in 0..13 {
-            for j in 0..7 {
-                for _k in 0..10 {
-                    idx = (idx + i * j) % 16;
-                    v = (v + i + j) % 128;
-                    buf[idx] = v as u8;
-                    assert_eq!(tree.get(&buf, &guard), ans.get(&buf));
-                }
+
+        for (key, value) in &ans {
+            let guard = pin();
+            let res = tree.get(key, &guard);
+            if *value % 2 == 0 {
+                assert_eq!(res, Some(value));
+            } else {
+                assert_eq!(res, None);
             }
         }
     }

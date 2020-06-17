@@ -63,7 +63,8 @@ impl NodePtr {
 
     pub unsafe fn dealloc(self) {
         let meta = &*(self.0 as *mut NodeMeta);
-        let node_size = type_bits_to_node_size(meta.type_version_lock_obsolete.load(Relaxed) >> 62);
+        let node_size =
+            type_bits_to_node_size(meta.type_version_lock_obsolete.load(Relaxed) & (0b11 << 62));
         let layout = Layout::from_size_align_unchecked(node_size, NODE_ALIGN);
         alloc::dealloc(self.0, layout);
     }
@@ -783,7 +784,8 @@ impl Node for Node256 {
     unsafe fn insert(this: NodePtr, key: u8, child: NodePtr) {
         let data = this.data_mut::<Self>();
         data.children[key as usize] = child;
-        this.meta_mut().count += 1;
+        // hack
+        this.meta_mut().count = this.meta_mut().count.wrapping_add(1);
     }
     unsafe fn get_any_child(this: NodePtr) -> NodePtr {
         let mut any_child = NodePtr::null();
