@@ -10,3 +10,11 @@ static_assertions = "1.1.0"
 
 [dev-dependencies]
 rand = "0.7.3"
+criterion = "0.3.2"
+
+[target.'cfg(not(target_env = "msvc"))'.dev-dependencies]
+jemallocator = "0.3.2"
+
+[[bench]]
+name = "insert"
+harness = false

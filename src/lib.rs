@@ -311,7 +311,11 @@ mod tests {
     use super::*;
     use crossbeam_epoch::pin;
     use rand::prelude::*;
-    use std::collections::HashMap;
+    use std::{
+        collections::HashMap,
+        fs::File,
+        io::{BufRead, BufReader},
+    };
 
     #[test]
     fn single_thread() {
@@ -376,5 +380,28 @@ mod tests {
                 assert_eq!(res, None);
             }
         }
+    }
+
+    #[test]
+    fn insert_words() {
+        let mut words: Vec<String> = File::open("words.txt")
+            .map(BufReader::new)
+            .and_then(|f| f.lines().collect())
+            .unwrap();
+        let mut rng = StdRng::seed_from_u64(114514);
+        words.shuffle(&mut rng);
+        let tree = Tree::new();
+        for word in words {
+            let guard = pin();
+            tree.insert(word.as_bytes(), 1u8, &guard);
+        }
+    }
+
+    #[test]
+    fn test() {
+        let tree = Tree::new();
+        let guard = pin();
+        tree.insert(b"abcd", 1u8, &guard);
+        tree.insert(b"abc", 1u8, &guard);
     }
 }
