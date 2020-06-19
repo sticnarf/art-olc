@@ -69,7 +69,7 @@ impl<V> Tree<V> {
         })
     }
 
-    pub fn insert<'a, 'g>(&self, key: &[u8], value: V, guard: &'g Guard) {
+    pub fn insert(&self, key: &[u8], value: V, guard: &Guard) {
         let mut value = ManuallyDrop::new(value);
 
         // restart begin
@@ -128,7 +128,7 @@ impl<V> Tree<V> {
                 node.check(version)?;
 
                 if next_node.is_null() {
-                    node.insert_and_unlock(
+                    node.insert_and_unlock::<V>(
                         version,
                         parent_node,
                         parent_version,
@@ -187,6 +187,112 @@ impl<V> Tree<V> {
             }
         });
     }
+
+    pub fn remove(&self, key: &[u8], guard: &Guard) {
+        restart_when_needed(|| unsafe {
+            let mut node = NodePtr::null();
+            let mut next_node = self.root;
+            let mut parent_node;
+            let mut parent_key;
+            let mut node_key = 0u8;
+            let mut parent_version = 0u64;
+            let mut level = 0usize;
+
+            loop {
+                parent_node = node;
+                parent_key = node_key;
+                node = next_node;
+                let version = node.read_lock()?;
+
+                match node.check_prefix(key, level) {
+                    CheckPrefixResult::NoMatch => {
+                        node.read_unlock(version)?;
+                        return Ok(());
+                    }
+                    CheckPrefixResult::Match { next_level, .. } => {
+                        level = next_level;
+                        node_key = key[level];
+                        next_node = node.get_child(node_key);
+
+                        node.check(version)?;
+
+                        if next_node.is_null() {
+                            node.read_unlock(version)?;
+                            return Ok(());
+                        }
+
+                        if next_node.is_leaf() {
+                            let next_node = next_node.get_leaf();
+                            if next_node.key() == key {
+                                next_node.dealloc::<V>();
+                            } else {
+                                return Ok(());
+                            }
+
+                            let child_count = node.child_count();
+                            assert!(parent_node.is_null() || child_count != 1);
+                            if child_count == 2 && !parent_node.is_null() {
+                                parent_node.upgrade_to_write_lock(parent_version)?;
+                                if let Err(restart) = node.upgrade_to_write_lock(version) {
+                                    parent_node.write_unlock();
+                                    return Err(restart);
+                                }
+
+                                let (second_node, second_node_key) =
+                                    node.get_second_child(node_key);
+                                if second_node.is_leaf() {
+                                    parent_node.change(parent_key, second_node);
+
+                                    parent_node.write_unlock();
+                                    node.write_unlock_obsolete();
+                                    guard.defer(move || {
+                                        node.dealloc();
+                                    });
+                                } else {
+                                    if let Err(restart) = second_node.write_lock() {
+                                        node.write_unlock();
+                                        parent_node.write_unlock();
+                                        return Err(restart);
+                                    }
+
+                                    parent_node.change(parent_key, second_node);
+                                    parent_node.write_unlock();
+
+                                    second_node.add_prefix_before(node, second_node_key);
+                                    second_node.write_unlock();
+
+                                    node.write_unlock_obsolete();
+                                    guard.defer(move || {
+                                        node.dealloc();
+                                    });
+                                }
+                            } else {
+                                node.remove_and_unlock(
+                                    version,
+                                    key[level],
+                                    parent_node,
+                                    parent_version,
+                                    parent_key,
+                                    guard,
+                                )?;
+                            }
+                            return Ok(());
+                        }
+                    }
+                }
+                level += 1;
+                parent_version = version;
+            }
+        });
+    }
+}
+
+impl<V> Drop for Tree<V> {
+    fn drop(&mut self) {
+        unsafe {
+            self.root.drop::<V>();
+        }
+    }
 }
 
 pub struct NeedRestart;
@@ -230,6 +336,41 @@ mod tests {
             let guard = pin();
             let res = tree.get(key, &guard);
             if *value % 2 == 0 {
+                assert_eq!(res, Some(value));
+            } else {
+                assert_eq!(res, None);
+            }
+        }
+
+        for (key, value) in &ans {
+            if *value % 4 == 0 {
+                let guard = pin();
+                tree.remove(key, &guard);
+            }
+        }
+
+        for (key, value) in &ans {
+            let guard = pin();
+            let res = tree.get(key, &guard);
+            if *value % 4 == 2 {
+                assert_eq!(res, Some(value));
+            } else {
+                assert_eq!(res, None);
+            }
+        }
+
+        for (key, value) in &ans {
+            if *value % 4 == 3 {
+                let guard = pin();
+                tree.insert(key, *value, &guard);
+            }
+        }
+
+        for (key, value) in &ans {
+            let guard = pin();
+            let res = tree.get(key, &guard);
+            let rem = *value % 4;
+            if rem == 2 || rem == 3 {
                 assert_eq!(res, Some(value));
             } else {
                 assert_eq!(res, None);
