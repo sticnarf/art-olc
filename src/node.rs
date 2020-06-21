@@ -53,16 +53,18 @@ pub struct NodePtr(*mut u8);
 unsafe impl Send for NodePtr {}
 
 impl NodePtr {
+    #[inline]
     pub fn null() -> NodePtr {
         NodePtr(ptr::null_mut())
     }
 
+    #[inline]
     pub fn is_null(self) -> bool {
         self.0 == ptr::null_mut()
     }
 
+    #[inline]
     pub unsafe fn dealloc(self) {
-        assert!(!self.is_leaf());
         let meta = &*(self.0 as *mut NodeMeta);
         let node_size =
             type_bits_to_node_size(meta.type_version_lock_obsolete.load(Relaxed) & (0b11 << 62));
@@ -70,33 +72,40 @@ impl NodePtr {
         alloc::dealloc(self.0, layout);
     }
 
+    #[inline]
     unsafe fn meta_mut<'a>(self) -> &'a mut NodeMeta {
         &mut *(self.0 as *mut NodeMeta)
     }
 
+    #[inline]
     unsafe fn data_mut<'a, N: Node>(self) -> &'a mut N {
         &mut *(self.0.wrapping_add(META_LEN) as *mut N)
     }
 
+    #[inline]
     unsafe fn type_bits(self) -> u64 {
         self.meta_mut().type_version_lock_obsolete.load(Relaxed) & (0b11 << 62)
     }
 
+    #[inline]
     pub unsafe fn has_prefix(self) -> bool {
         let meta = &*(self.0 as *mut NodeMeta);
         meta.prefix_len > 0
     }
 
+    #[inline]
     pub unsafe fn prefix_len(self) -> usize {
         let meta = &*(self.0 as *mut NodeMeta);
         meta.prefix_len as usize
     }
 
+    #[inline]
     pub unsafe fn prefix_ptr(self) -> *mut u8 {
         let meta = &mut *(self.0 as *mut NodeMeta);
         meta.prefix.as_mut_ptr()
     }
 
+    #[inline]
     pub unsafe fn set_prefix(self, prefix: *const u8, prefix_len: usize) {
         let meta = self.meta_mut();
         if prefix_len > 0 {
@@ -111,18 +120,22 @@ impl NodePtr {
         }
     }
 
+    #[inline]
     pub unsafe fn child_count(self) -> usize {
         self.meta_mut().count as usize
     }
 
-    pub fn is_leaf(self) -> bool {
+    #[inline]
+    pub fn is_entry(self) -> bool {
         (self.0 as usize & MSB) == MSB
     }
 
-    pub unsafe fn get_leaf(self) -> EntryPtr {
+    #[inline]
+    pub unsafe fn to_entry(self) -> EntryPtr {
         EntryPtr((self.0 as usize & !MSB) as *mut u8)
     }
 
+    #[inline]
     pub unsafe fn read_lock(self) -> Result<u64, NeedRestart> {
         let type_version_lock_obsolete = self.meta_mut().type_version_lock_obsolete.load(SeqCst);
         if is_locked(type_version_lock_obsolete) || is_obsolete(type_version_lock_obsolete) {
@@ -132,6 +145,7 @@ impl NodePtr {
         }
     }
 
+    #[inline]
     pub unsafe fn read_unlock(self, version: u64) -> Result<(), NeedRestart> {
         if version == self.meta_mut().type_version_lock_obsolete.load(SeqCst) {
             Ok(())
@@ -140,12 +154,14 @@ impl NodePtr {
         }
     }
 
+    #[inline]
     pub unsafe fn write_lock(self) -> Result<(), NeedRestart> {
         let version = self.read_lock()?;
         self.upgrade_to_write_lock(version)?;
         Ok(())
     }
 
+    #[inline]
     pub unsafe fn upgrade_to_write_lock(self, version: u64) -> Result<u64, NeedRestart> {
         if let Ok(_) = self.meta_mut().type_version_lock_obsolete.compare_exchange(
             version,
@@ -159,26 +175,30 @@ impl NodePtr {
         }
     }
 
+    #[inline]
     pub unsafe fn write_unlock(self) {
         self.meta_mut()
             .type_version_lock_obsolete
             .fetch_add(0b10, SeqCst);
     }
 
+    #[inline]
     pub unsafe fn write_unlock_obsolete(self) {
         self.meta_mut()
             .type_version_lock_obsolete
             .fetch_add(0b11, SeqCst);
     }
 
+    #[inline]
     pub unsafe fn check(self, start_read: u64) -> Result<(), NeedRestart> {
         self.read_unlock(start_read)
     }
 
+    #[inline]
     pub unsafe fn check_prefix(self, key: &[u8], mut level: usize) -> CheckPrefixResult {
         if self.has_prefix() {
             let prefix_len = self.prefix_len();
-            if key.len() <= level + prefix_len {
+            if key.len() < level + prefix_len {
                 return CheckPrefixResult::NoMatch;
             }
             for i in 0..usize::min(prefix_len, MAX_STORED_PREFIX_LENGTH) {
@@ -201,6 +221,7 @@ impl NodePtr {
         }
     }
 
+    #[inline]
     pub unsafe fn check_prefix_pessimistic(
         self,
         key: &[u8],
@@ -219,7 +240,7 @@ impl NodePtr {
                 } else {
                     self.prefix_ptr().wrapping_add(i).read()
                 };
-                if cur_key != key[level] {
+                if Some(&cur_key) != key.get(level) {
                     let non_matching_key = cur_key;
                     let mut remaining_prefix = Prefix::default();
                     if self.prefix_len() > MAX_STORED_PREFIX_LENGTH {
@@ -254,6 +275,7 @@ impl NodePtr {
         Ok(CheckPrefixPessimisticResult::Match { next_level: level })
     }
 
+    #[inline]
     pub unsafe fn add_prefix_before(self, node: NodePtr, key: u8) {
         let prefix_copy_count = usize::min(MAX_STORED_PREFIX_LENGTH, node.prefix_len() + 1);
         ptr::copy(
@@ -277,6 +299,7 @@ impl NodePtr {
         self.meta_mut().prefix_len += (node.prefix_len() + 1) as u32;
     }
 
+    #[inline]
     unsafe fn get_any_child_entry(self) -> Result<EntryPtr, NeedRestart> {
         let mut next_node = self;
 
@@ -287,13 +310,13 @@ impl NodePtr {
             next_node = node.get_any_child();
             node.read_unlock(version)?;
 
-            assert_ne!(next_node.0, ptr::null_mut());
-            if next_node.is_leaf() {
-                return Ok(next_node.get_leaf());
+            if next_node.is_entry() {
+                return Ok(next_node.to_entry());
             }
         }
     }
 
+    #[inline]
     unsafe fn get_any_child(self) -> NodePtr {
         const VTABLE: [unsafe fn(NodePtr) -> NodePtr; 4] = [
             Node4::get_any_child,
@@ -304,9 +327,10 @@ impl NodePtr {
         VTABLE[(self.type_bits() >> 62) as usize](self)
     }
 
+    #[inline]
     pub unsafe fn drop<V>(self) {
-        if self.is_leaf() {
-            self.get_leaf().dealloc::<V>();
+        if self.is_entry() {
+            self.to_entry().dealloc::<V>();
             return;
         }
 
@@ -320,8 +344,9 @@ impl NodePtr {
         vtable[(type_bits >> 62) as usize](self)
     }
 
-    pub unsafe fn get_child(self, node_key: u8) -> NodePtr {
-        const VTABLE: [unsafe fn(NodePtr, u8) -> NodePtr; 4] = [
+    #[inline]
+    pub unsafe fn get_child(self, node_key: Option<u8>) -> NodePtr {
+        const VTABLE: [unsafe fn(NodePtr, Option<u8>) -> NodePtr; 4] = [
             Node4::get_child,
             Node16::get_child,
             Node48::get_child,
@@ -331,13 +356,14 @@ impl NodePtr {
         VTABLE[(type_bits >> 62) as usize](self, node_key)
     }
 
-    pub unsafe fn get_second_child(self, node_key: u8) -> (NodePtr, u8) {
-        assert_eq!(self.type_bits(), Node4::TYPE_BITS);
+    #[inline]
+    pub unsafe fn get_second_child(self, node_key: Option<u8>) -> (NodePtr, Option<u8>) {
         Node4::get_second_child(self, node_key)
     }
 
-    pub unsafe fn change(self, parent_key: u8, new_node: NodePtr) -> bool {
-        const VTABLE: [unsafe fn(NodePtr, u8, NodePtr) -> bool; 4] = [
+    #[inline]
+    pub unsafe fn change(self, parent_key: Option<u8>, new_node: NodePtr) -> bool {
+        const VTABLE: [unsafe fn(NodePtr, Option<u8>, NodePtr) -> bool; 4] = [
             Node4::change,
             Node16::change,
             Node48::change,
@@ -346,13 +372,14 @@ impl NodePtr {
         VTABLE[(self.type_bits() >> 62) as usize](self, parent_key, new_node)
     }
 
+    #[inline]
     pub unsafe fn insert_and_unlock<V>(
         self,
         version: u64,
         parent_node: NodePtr,
         parent_version: u64,
-        parent_key: u8,
-        key: u8,
+        parent_key: Option<u8>,
+        key: Option<u8>,
         val: NodePtr,
         guard: &Guard,
     ) -> Result<(), NeedRestart> {
@@ -401,13 +428,14 @@ impl NodePtr {
         }
     }
 
+    #[inline]
     pub unsafe fn remove_and_unlock(
         self,
         version: u64,
-        key: u8,
+        key: Option<u8>,
         parent_node: NodePtr,
         parent_version: u64,
-        parent_key: u8,
+        parent_key: Option<u8>,
         guard: &Guard,
     ) -> Result<(), NeedRestart> {
         match self.type_bits() {
@@ -456,6 +484,7 @@ impl NodePtr {
 pub struct EntryPtr(*mut u8);
 
 impl EntryPtr {
+    #[inline]
     pub fn alloc<V>(key: &[u8], value: V) -> EntryPtr {
         let layout = Self::layout::<V>(key.len());
         let offset = layout.size() - mem::size_of::<V>();
@@ -469,6 +498,7 @@ impl EntryPtr {
         }
     }
 
+    #[inline]
     pub unsafe fn dealloc<V>(self) {
         let ptr = self.0;
         let key_len = (ptr as *mut usize).read();
@@ -476,12 +506,14 @@ impl EntryPtr {
         alloc::dealloc(ptr, layout);
     }
 
+    #[inline]
     pub unsafe fn key<'a>(self) -> &'a [u8] {
         let ptr = self.0;
         let key_len = (ptr as *mut usize).read();
         slice::from_raw_parts_mut(ptr.wrapping_add(mem::size_of::<usize>()), key_len)
     }
 
+    #[inline]
     pub unsafe fn value_mut<'a, V>(self) -> &'a mut V {
         let ptr = self.0;
         let key_len = (ptr as *mut usize).read();
@@ -490,6 +522,7 @@ impl EntryPtr {
         &mut *(ptr.wrapping_add(offset) as *mut V)
     }
 
+    #[inline]
     fn layout<V>(key_len: usize) -> Layout {
         let align_v = mem::align_of::<V>();
         let key_space = mem::size_of::<usize>() + key_len;
@@ -526,6 +559,7 @@ pub enum CheckPrefixPessimisticResult {
 pub trait Node: Sized {
     const TYPE_BITS: u64;
 
+    #[inline]
     fn alloc() -> NodePtr {
         unsafe {
             let ptr = alloc::alloc_zeroed(Layout::from_size_align_unchecked(
@@ -537,27 +571,31 @@ pub trait Node: Sized {
         }
     }
 
+    #[inline]
     unsafe fn alloc_with_prefix(prefix: *const u8, prefix_len: usize) -> NodePtr {
         let ptr = Self::alloc();
         ptr.set_prefix(prefix, prefix_len);
         ptr
     }
 
+    #[inline]
     fn node_size() -> usize {
         mem::size_of::<NodeMeta>() + mem::size_of::<Self>()
     }
 
-    unsafe fn insert(this: NodePtr, key: u8, child: NodePtr);
+    unsafe fn insert(this: NodePtr, key: Option<u8>, child: NodePtr);
 
-    unsafe fn remove(this: NodePtr, key: u8);
+    unsafe fn remove(this: NodePtr, key: Option<u8>);
 
     unsafe fn drop<V>(this: NodePtr);
 
     unsafe fn get_any_child(this: NodePtr) -> NodePtr;
 
-    unsafe fn get_child(this: NodePtr, node_key: u8) -> NodePtr;
+    unsafe fn get_child(this: NodePtr, node_key: Option<u8>) -> NodePtr;
 
-    unsafe fn change(this: NodePtr, key: u8, new_node: NodePtr) -> bool;
+    unsafe fn change(this: NodePtr, key: Option<u8>, new_node: NodePtr) -> bool;
+
+    unsafe fn set_leaf(this: NodePtr, leaf: NodePtr);
 
     unsafe fn is_full(this: NodePtr) -> bool;
 
@@ -565,13 +603,14 @@ pub trait Node: Sized {
 
     unsafe fn copy_to<Dst: Node>(this: NodePtr, dst: NodePtr);
 
+    #[inline]
     unsafe fn insert_grow<N: Node, V>(
         this: NodePtr,
         version: u64,
         parent_node: NodePtr,
         parent_version: u64,
-        parent_key: u8,
-        key: u8,
+        parent_key: Option<u8>,
+        key: Option<u8>,
         val: NodePtr,
         guard: &Guard,
     ) -> Result<(), NeedRestart> {
@@ -606,13 +645,14 @@ pub trait Node: Sized {
         Ok(())
     }
 
+    #[inline]
     unsafe fn remove_and_shrink<N: Node>(
         this: NodePtr,
         version: u64,
         parent_node: NodePtr,
         parent_version: u64,
-        parent_key: u8,
-        key: u8,
+        parent_key: Option<u8>,
+        key: Option<u8>,
         guard: &Guard,
     ) -> Result<(), NeedRestart> {
         if !Self::is_under_full(this) || parent_node.is_null() {
@@ -648,49 +688,71 @@ pub trait Node: Sized {
 pub struct Node4 {
     keys: [u8; 4],
     children: [NodePtr; 4],
+    leaf: NodePtr,
 }
 
 impl Node4 {
-    unsafe fn get_second_child(this: NodePtr, key: u8) -> (NodePtr, u8) {
-        let count = this.meta_mut().count as usize;
+    #[inline]
+    unsafe fn get_second_child(this: NodePtr, key: Option<u8>) -> (NodePtr, Option<u8>) {
         let node: &mut Self = this.data_mut();
-        for i in 0..count {
-            if node.keys[i] != key {
-                return (node.children[i], node.keys[i]);
+        if let Some(key) = key {
+            if !node.leaf.is_null() {
+                return (node.leaf, None);
             }
+            let count = this.meta_mut().count as usize;
+            for i in 0..count {
+                if node.keys[i] != key {
+                    return (node.children[i], Some(node.keys[i]));
+                }
+            }
+            unreachable!()
+        } else {
+            (node.children[0], Some(node.keys[0]))
         }
-        (NodePtr::null(), 0)
     }
 }
 
 impl Node for Node4 {
     const TYPE_BITS: u64 = 0;
 
-    unsafe fn insert(this: NodePtr, key: u8, child: NodePtr) {
-        let count = this.meta_mut().count as usize;
-        let node: &mut Self = this.data_mut();
-        let mut pos = 0;
-        while pos < count && node.keys[pos] < key {
-            pos += 1;
-        }
-        node.keys.copy_within(pos..count, pos + 1);
-        node.children.copy_within(pos..count, pos + 1);
-        node.keys[pos] = key;
-        node.children[pos] = child;
-        this.meta_mut().count += 1;
-    }
-    unsafe fn remove(this: NodePtr, key: u8) {
-        let count = this.meta_mut().count as usize;
-        let node: &mut Self = this.data_mut();
-        for i in 0..count {
-            if node.keys[i] == key {
-                node.keys.copy_within((i + 1)..count, i);
-                node.children.copy_within((i + 1)..count, i);
-                this.meta_mut().count -= 1;
-                return;
+    #[inline]
+    unsafe fn insert(this: NodePtr, key: Option<u8>, child: NodePtr) {
+        if let Some(key) = key {
+            let count = this.meta_mut().count as usize;
+            let node = this.data_mut::<Self>();
+            let mut pos = 0;
+            while pos < count && node.keys[pos] < key {
+                pos += 1;
             }
+            node.keys.copy_within(pos..count, pos + 1);
+            node.children.copy_within(pos..count, pos + 1);
+            node.keys[pos] = key;
+            node.children[pos] = child;
+            this.meta_mut().count += 1;
+        } else {
+            this.data_mut::<Self>().leaf = child;
         }
     }
+
+    #[inline]
+    unsafe fn remove(this: NodePtr, key: Option<u8>) {
+        if let Some(key) = key {
+            let count = this.meta_mut().count as usize;
+            let node: &mut Self = this.data_mut();
+            for i in 0..count {
+                if node.keys[i] == key {
+                    node.keys.copy_within((i + 1)..count, i);
+                    node.children.copy_within((i + 1)..count, i);
+                    this.meta_mut().count -= 1;
+                    return;
+                }
+            }
+        } else {
+            this.data_mut::<Self>().leaf = NodePtr::null();
+        }
+    }
+
+    #[inline]
     unsafe fn drop<V>(this: NodePtr) {
         {
             let count = this.child_count();
@@ -698,15 +760,23 @@ impl Node for Node4 {
             for i in 0..count {
                 data.children[i].drop::<V>();
             }
+            if !data.leaf.is_null() {
+                data.leaf.to_entry().dealloc::<V>();
+            }
         }
         this.dealloc();
     }
+
+    #[inline]
     unsafe fn get_any_child(this: NodePtr) -> NodePtr {
-        let mut any_child = NodePtr::null();
         let count = this.meta_mut().count as usize;
         let data = this.data_mut::<Self>();
+        if !data.leaf.is_null() {
+            return data.leaf;
+        }
+        let mut any_child = NodePtr::null();
         for i in 0..count {
-            if data.children[i].is_leaf() {
+            if data.children[i].is_entry() {
                 return data.children[i];
             } else {
                 any_child = data.children[i];
@@ -714,49 +784,75 @@ impl Node for Node4 {
         }
         any_child
     }
-    unsafe fn get_child(this: NodePtr, node_key: u8) -> NodePtr {
-        let count = this.meta_mut().count as usize;
-        let data = this.data_mut::<Self>();
-        for i in 0..count {
-            if data.keys[i] == node_key {
-                return data.children[i];
+
+    #[inline]
+    unsafe fn get_child(this: NodePtr, node_key: Option<u8>) -> NodePtr {
+        if let Some(node_key) = node_key {
+            let count = this.meta_mut().count as usize;
+            let data = this.data_mut::<Self>();
+            for i in 0..count {
+                if data.keys[i] == node_key {
+                    return data.children[i];
+                }
             }
+            NodePtr::null()
+        } else {
+            this.data_mut::<Self>().leaf
         }
-        NodePtr::null()
     }
-    unsafe fn change(this: NodePtr, key: u8, new_node: NodePtr) -> bool {
-        let count = this.meta_mut().count as usize;
-        let data = this.data_mut::<Self>();
-        for i in 0..count {
-            if data.keys[i] == key {
-                data.children[i] = new_node;
-                return true;
+
+    #[inline]
+    unsafe fn change(this: NodePtr, key: Option<u8>, new_node: NodePtr) -> bool {
+        if let Some(key) = key {
+            let count = this.meta_mut().count as usize;
+            let data = this.data_mut::<Self>();
+            for i in 0..count {
+                if data.keys[i] == key {
+                    data.children[i] = new_node;
+                    return true;
+                }
             }
+            unreachable!()
+        } else {
+            this.data_mut::<Self>().leaf = new_node;
+            true
         }
-        unreachable!()
     }
+
+    #[inline]
+    unsafe fn set_leaf(this: NodePtr, leaf: NodePtr) {
+        this.data_mut::<Self>().leaf = leaf;
+    }
+
+    #[inline]
     unsafe fn is_full(this: NodePtr) -> bool {
         this.meta_mut().count == 4
     }
+
+    #[inline]
     unsafe fn is_under_full(_: NodePtr) -> bool {
         false
     }
 
+    #[inline]
     unsafe fn copy_to<Dst: Node>(this: NodePtr, dst: NodePtr) {
         let count = this.meta_mut().count as usize;
         let node = this.data_mut::<Self>();
         for i in 0..count {
-            Dst::insert(dst, node.keys[i], node.children[i]);
+            Dst::insert(dst, Some(node.keys[i]), node.children[i]);
         }
+        Dst::set_leaf(dst, node.leaf);
     }
 }
 
 pub struct Node16 {
     keys: [u8; 16],
     children: [NodePtr; 16],
+    leaf: NodePtr,
 }
 
 impl Node16 {
+    #[inline]
     fn flip_sign(key_byte: u8) -> u8 {
         key_byte ^ 128
     }
@@ -765,6 +861,7 @@ impl Node16 {
         any(target_arch = "x86", target_arch = "x86_64"),
         target_feature = "sse2"
     ))]
+    #[inline]
     fn get_child_pos(&self, key: u8, count: usize) -> Option<usize> {
         #[cfg(target_arch = "x86")]
         use std::arch::x86::*;
@@ -795,41 +892,53 @@ impl Node for Node16 {
         any(target_arch = "x86", target_arch = "x86_64"),
         target_feature = "sse2"
     ))]
-    unsafe fn insert(this: NodePtr, key: u8, child: NodePtr) {
+    #[inline]
+    unsafe fn insert(this: NodePtr, key: Option<u8>, child: NodePtr) {
         #[cfg(target_arch = "x86")]
         use std::arch::x86::*;
         #[cfg(target_arch = "x86_64")]
         use std::arch::x86_64::*;
 
-        let flipped = Self::flip_sign(key);
-        let node: &mut Self = this.data_mut();
-        let cmp = _mm_cmplt_epi8(
-            _mm_set1_epi8(flipped as i8),
-            _mm_loadu_si128(node.keys.as_ptr() as *const _),
-        );
-        let count = this.meta_mut().count as usize;
-        let bitfield = _mm_movemask_epi8(cmp) & (0xFFFF >> (16 - count));
-        let pos = if bitfield == 0 {
-            count
+        if let Some(key) = key {
+            let flipped = Self::flip_sign(key);
+            let node: &mut Self = this.data_mut();
+            let cmp = _mm_cmplt_epi8(
+                _mm_set1_epi8(flipped as i8),
+                _mm_loadu_si128(node.keys.as_ptr() as *const _),
+            );
+            let count = this.meta_mut().count as usize;
+            let bitfield = _mm_movemask_epi8(cmp) & (0xFFFF >> (16 - count));
+            let pos = if bitfield == 0 {
+                count
+            } else {
+                bitfield.trailing_zeros() as usize
+            };
+            node.keys.copy_within(pos..count, pos + 1);
+            node.children.copy_within(pos..count, pos + 1);
+            node.keys[pos] = flipped;
+            node.children[pos] = child;
+            this.meta_mut().count += 1;
         } else {
-            bitfield.trailing_zeros() as usize
-        };
-        node.keys.copy_within(pos..count, pos + 1);
-        node.children.copy_within(pos..count, pos + 1);
-        node.keys[pos] = flipped;
-        node.children[pos] = child;
-        this.meta_mut().count += 1;
-    }
-    unsafe fn remove(this: NodePtr, key: u8) {
-        let count = this.meta_mut().count as usize;
-        let data = this.data_mut::<Self>();
-        if let Some(pos) = data.get_child_pos(key, count) {
-            data.keys.copy_within((pos + 1)..count, pos);
-            data.children.copy_within((pos + 1)..count, pos);
-            this.meta_mut().count -= 1;
-            assert!(Self::get_child(this, key).is_null());
+            this.data_mut::<Self>().leaf = child;
         }
     }
+
+    #[inline]
+    unsafe fn remove(this: NodePtr, key: Option<u8>) {
+        if let Some(key) = key {
+            let count = this.meta_mut().count as usize;
+            let data = this.data_mut::<Self>();
+            if let Some(pos) = data.get_child_pos(key, count) {
+                data.keys.copy_within((pos + 1)..count, pos);
+                data.children.copy_within((pos + 1)..count, pos);
+                this.meta_mut().count -= 1;
+            }
+        } else {
+            this.data_mut::<Self>().leaf = NodePtr::null();
+        }
+    }
+
+    #[inline]
     unsafe fn drop<V>(this: NodePtr) {
         {
             let count = this.child_count();
@@ -837,53 +946,87 @@ impl Node for Node16 {
             for i in 0..count {
                 data.children[i].drop::<V>();
             }
+            if !data.leaf.is_null() {
+                data.leaf.to_entry().dealloc::<V>();
+            }
         }
         this.dealloc();
     }
+
+    #[inline]
     unsafe fn get_any_child(this: NodePtr) -> NodePtr {
         let count = this.meta_mut().count as usize;
         let data = this.data_mut::<Self>();
+        if !data.leaf.is_null() {
+            return data.leaf;
+        }
         for i in 0..count {
-            if data.children[i].is_leaf() {
+            if data.children[i].is_entry() {
                 return data.children[i];
             }
         }
         data.children[0]
     }
-    unsafe fn get_child(this: NodePtr, node_key: u8) -> NodePtr {
-        let count = this.meta_mut().count as usize;
-        let data = this.data_mut::<Self>();
-        if let Some(pos) = data.get_child_pos(node_key, count) {
-            data.children[pos]
+
+    #[inline]
+    unsafe fn get_child(this: NodePtr, node_key: Option<u8>) -> NodePtr {
+        if let Some(node_key) = node_key {
+            let count = this.meta_mut().count as usize;
+            let data = this.data_mut::<Self>();
+            if let Some(pos) = data.get_child_pos(node_key, count) {
+                data.children[pos]
+            } else {
+                NodePtr::null()
+            }
         } else {
-            NodePtr::null()
+            this.data_mut::<Self>().leaf
         }
     }
-    unsafe fn change(this: NodePtr, key: u8, new_node: NodePtr) -> bool {
-        let count = this.meta_mut().count as usize;
-        let data = this.data_mut::<Self>();
-        let pos = data.get_child_pos(key, count).unwrap();
-        data.children[pos] = new_node;
-        true
+
+    #[inline]
+    unsafe fn change(this: NodePtr, key: Option<u8>, new_node: NodePtr) -> bool {
+        if let Some(key) = key {
+            let count = this.meta_mut().count as usize;
+            let data = this.data_mut::<Self>();
+            let pos = data.get_child_pos(key, count).unwrap();
+            data.children[pos] = new_node;
+            true
+        } else {
+            this.data_mut::<Self>().leaf = new_node;
+            true
+        }
     }
+
+    #[inline]
+    unsafe fn set_leaf(this: NodePtr, leaf: NodePtr) {
+        this.data_mut::<Self>().leaf = leaf;
+    }
+
+    #[inline]
     unsafe fn is_full(this: NodePtr) -> bool {
         this.meta_mut().count == 16
     }
+
+    #[inline]
     unsafe fn is_under_full(this: NodePtr) -> bool {
         this.meta_mut().count == 3
     }
+
+    #[inline]
     unsafe fn copy_to<Dst: Node>(this: NodePtr, dst: NodePtr) {
         let count = this.meta_mut().count as usize;
         let node = this.data_mut::<Self>();
         for i in 0..count {
-            Dst::insert(dst, Self::flip_sign(node.keys[i]), node.children[i]);
+            Dst::insert(dst, Some(Self::flip_sign(node.keys[i])), node.children[i]);
         }
+        Dst::set_leaf(dst, node.leaf);
     }
 }
 
 pub struct Node48 {
     child_index: [u8; 256],
     children: [NodePtr; 48],
+    leaf: NodePtr,
 }
 
 impl Node48 {
@@ -893,6 +1036,7 @@ impl Node48 {
 impl Node for Node48 {
     const TYPE_BITS: u64 = 2 << 62;
 
+    #[inline]
     fn alloc() -> NodePtr {
         unsafe {
             let ptr = alloc::alloc_zeroed(Layout::from_size_align_unchecked(
@@ -906,32 +1050,44 @@ impl Node for Node48 {
         }
     }
 
-    unsafe fn insert(this: NodePtr, key: u8, child: NodePtr) {
-        let mut pos = this.meta_mut().count as usize;
-        let data = this.data_mut::<Self>();
-        if !data.children[pos].is_null() {
-            for i in 0..48 {
-                if data.children[i].is_null() {
-                    pos = i;
-                    break;
+    #[inline]
+    unsafe fn insert(this: NodePtr, key: Option<u8>, child: NodePtr) {
+        if let Some(key) = key {
+            let mut pos = this.meta_mut().count as usize;
+            let data = this.data_mut::<Self>();
+            if !data.children[pos].is_null() {
+                for i in 0..48 {
+                    if data.children[i].is_null() {
+                        pos = i;
+                        break;
+                    }
                 }
             }
+            data.children[pos] = child;
+            data.child_index[key as usize] = pos as u8;
+            this.meta_mut().count += 1;
+        } else {
+            this.data_mut::<Self>().leaf = child;
         }
-        data.children[pos] = child;
-        data.child_index[key as usize] = pos as u8;
-        this.meta_mut().count += 1;
     }
-    unsafe fn remove(this: NodePtr, key: u8) {
-        let data = this.data_mut::<Self>();
-        let index = data.child_index[key as usize];
-        if index == Self::EMPTY_MARKER {
-            return;
+
+    #[inline]
+    unsafe fn remove(this: NodePtr, key: Option<u8>) {
+        if let Some(key) = key {
+            let data = this.data_mut::<Self>();
+            let index = data.child_index[key as usize];
+            if index == Self::EMPTY_MARKER {
+                return;
+            }
+            data.children[index as usize] = NodePtr::null();
+            data.child_index[key as usize] = Self::EMPTY_MARKER;
+            this.meta_mut().count -= 1;
+        } else {
+            this.data_mut::<Self>().leaf = NodePtr::null();
         }
-        data.children[index as usize] = NodePtr::null();
-        data.child_index[key as usize] = Self::EMPTY_MARKER;
-        this.meta_mut().count -= 1;
-        assert!(Self::get_child(this, key).is_null());
     }
+
+    #[inline]
     unsafe fn drop<V>(this: NodePtr) {
         {
             let data = this.data_mut::<Self>();
@@ -941,17 +1097,25 @@ impl Node for Node48 {
                     data.children[index as usize].drop::<V>();
                 }
             }
+            if !data.leaf.is_null() {
+                data.leaf.to_entry().dealloc::<V>();
+            }
         }
         this.dealloc();
     }
+
+    #[inline]
     unsafe fn get_any_child(this: NodePtr) -> NodePtr {
-        let mut any_child = NodePtr::null();
         let data = this.data_mut::<Self>();
+        if !data.leaf.is_null() {
+            return data.leaf;
+        }
+        let mut any_child = NodePtr::null();
         for i in 0..=255 {
             let index = data.child_index[i];
             if index != Self::EMPTY_MARKER {
                 let child = data.children[index as usize];
-                if child.is_leaf() {
+                if child.is_entry() {
                     return child;
                 } else {
                     any_child = child;
@@ -960,56 +1124,95 @@ impl Node for Node48 {
         }
         any_child
     }
-    unsafe fn get_child(this: NodePtr, node_key: u8) -> NodePtr {
-        let data = this.data_mut::<Self>();
-        let index = data.child_index[node_key as usize];
-        if index == Self::EMPTY_MARKER {
-            NodePtr::null()
+
+    #[inline]
+    unsafe fn get_child(this: NodePtr, node_key: Option<u8>) -> NodePtr {
+        if let Some(node_key) = node_key {
+            let data = this.data_mut::<Self>();
+            let index = data.child_index[node_key as usize];
+            if index == Self::EMPTY_MARKER {
+                NodePtr::null()
+            } else {
+                data.children[index as usize]
+            }
         } else {
-            data.children[index as usize]
+            this.data_mut::<Self>().leaf
         }
     }
-    unsafe fn change(this: NodePtr, key: u8, new_node: NodePtr) -> bool {
-        let data = this.data_mut::<Self>();
-        let index = data.child_index[key as usize] as usize;
-        data.children[index] = new_node;
-        true
+
+    #[inline]
+    unsafe fn change(this: NodePtr, key: Option<u8>, new_node: NodePtr) -> bool {
+        if let Some(key) = key {
+            let data = this.data_mut::<Self>();
+            let index = data.child_index[key as usize] as usize;
+            data.children[index] = new_node;
+            true
+        } else {
+            this.data_mut::<Self>().leaf = NodePtr::null();
+            true
+        }
     }
+
+    #[inline]
+    unsafe fn set_leaf(this: NodePtr, leaf: NodePtr) {
+        this.data_mut::<Self>().leaf = leaf;
+    }
+
+    #[inline]
     unsafe fn is_full(this: NodePtr) -> bool {
         this.meta_mut().count == 48
     }
+
+    #[inline]
     unsafe fn is_under_full(this: NodePtr) -> bool {
         this.meta_mut().count == 12
     }
+
+    #[inline]
     unsafe fn copy_to<Dst: Node>(this: NodePtr, dst: NodePtr) {
         let data = this.data_mut::<Self>();
         for key in 0..256 {
             let idx = data.child_index[key];
             if idx != Self::EMPTY_MARKER {
-                Dst::insert(dst, key as u8, data.children[idx as usize]);
+                Dst::insert(dst, Some(key as u8), data.children[idx as usize]);
             }
         }
+        Dst::set_leaf(dst, data.leaf);
     }
 }
 
 pub struct Node256 {
     children: [NodePtr; 256],
+    leaf: NodePtr,
 }
 
 impl Node for Node256 {
     const TYPE_BITS: u64 = 3 << 62;
 
-    unsafe fn insert(this: NodePtr, key: u8, child: NodePtr) {
-        let data = this.data_mut::<Self>();
-        data.children[key as usize] = child;
-        // hack
-        this.meta_mut().count = this.meta_mut().count.wrapping_add(1);
+    #[inline]
+    unsafe fn insert(this: NodePtr, key: Option<u8>, child: NodePtr) {
+        if let Some(key) = key {
+            let data = this.data_mut::<Self>();
+            data.children[key as usize] = child;
+            // hack
+            this.meta_mut().count = this.meta_mut().count.wrapping_add(1);
+        } else {
+            this.data_mut::<Self>().leaf = child;
+        }
     }
-    unsafe fn remove(this: NodePtr, key: u8) {
-        this.data_mut::<Self>().children[key as usize] = NodePtr::null();
-        // hack
-        this.meta_mut().count = this.meta_mut().count.wrapping_sub(1);
+
+    #[inline]
+    unsafe fn remove(this: NodePtr, key: Option<u8>) {
+        if let Some(key) = key {
+            this.data_mut::<Self>().children[key as usize] = NodePtr::null();
+            // hack
+            this.meta_mut().count = this.meta_mut().count.wrapping_sub(1);
+        } else {
+            this.data_mut::<Self>().leaf = NodePtr::null();
+        }
     }
+
+    #[inline]
     unsafe fn drop<V>(this: NodePtr) {
         {
             let data = this.data_mut::<Self>();
@@ -1019,16 +1222,24 @@ impl Node for Node256 {
                     child.drop::<V>();
                 }
             }
+            if !data.leaf.is_null() {
+                data.leaf.to_entry().dealloc::<V>();
+            }
         }
         this.dealloc();
     }
+
+    #[inline]
     unsafe fn get_any_child(this: NodePtr) -> NodePtr {
-        let mut any_child = NodePtr::null();
         let data = this.data_mut::<Self>();
+        if !data.leaf.is_null() {
+            return data.leaf;
+        }
+        let mut any_child = NodePtr::null();
         for i in 0..=255 {
             let child = data.children[i];
             if !child.is_null() {
-                if child.is_leaf() {
+                if child.is_entry() {
                     return child;
                 } else {
                     any_child = child;
@@ -1037,32 +1248,58 @@ impl Node for Node256 {
         }
         any_child
     }
-    unsafe fn get_child(this: NodePtr, node_key: u8) -> NodePtr {
-        let data = this.data_mut::<Self>();
-        data.children[node_key as usize]
+
+    #[inline]
+    unsafe fn get_child(this: NodePtr, node_key: Option<u8>) -> NodePtr {
+        if let Some(node_key) = node_key {
+            let data = this.data_mut::<Self>();
+            data.children[node_key as usize]
+        } else {
+            this.data_mut::<Self>().leaf
+        }
     }
-    unsafe fn change(this: NodePtr, key: u8, new_node: NodePtr) -> bool {
-        let data = this.data_mut::<Self>();
-        data.children[key as usize] = new_node;
-        true
+
+    #[inline]
+    unsafe fn change(this: NodePtr, key: Option<u8>, new_node: NodePtr) -> bool {
+        if let Some(key) = key {
+            let data = this.data_mut::<Self>();
+            data.children[key as usize] = new_node;
+            true
+        } else {
+            this.data_mut::<Self>().leaf = new_node;
+            true
+        }
     }
+
+    #[inline]
+    unsafe fn set_leaf(this: NodePtr, leaf: NodePtr) {
+        this.data_mut::<Self>().leaf = leaf;
+    }
+
+    #[inline]
     unsafe fn is_full(_: NodePtr) -> bool {
         false
     }
+
+    #[inline]
     unsafe fn is_under_full(this: NodePtr) -> bool {
         this.meta_mut().count == 37
     }
+
+    #[inline]
     unsafe fn copy_to<Dst: Node>(this: NodePtr, dst: NodePtr) {
         let data = this.data_mut::<Self>();
         for i in 0..=255 {
             let node = data.children[i as usize];
             if !node.is_null() {
-                Dst::insert(dst, i, node);
+                Dst::insert(dst, Some(i), node);
             }
         }
+        Dst::set_leaf(dst, data.leaf);
     }
 }
 
+#[inline]
 fn type_bits_to_node_size(type_bits: u64) -> usize {
     match type_bits {
         Node4::TYPE_BITS => Node4::node_size(),

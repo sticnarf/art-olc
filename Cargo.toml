@@ -11,6 +11,8 @@ static_assertions = "1.1.0"
 [dev-dependencies]
 rand = "0.7.3"
 criterion = "0.3.2"
+crossbeam-utils = "0.7.2"
+crossbeam-skiplist = { git = "https://github.com/crossbeam-rs/crossbeam.git", rev = "81ab18efc7376f3277a6359fdc20d00b4bcf911c" }
 
 [target.'cfg(not(target_env = "msvc"))'.dev-dependencies]
 jemallocator = "0.3.2"
