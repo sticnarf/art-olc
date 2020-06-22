@@ -5,6 +5,7 @@ use node::*;
 use std::{
     marker::PhantomData,
     mem::ManuallyDrop,
+    ops::RangeBounds,
     sync::atomic::{AtomicU64, Ordering::Relaxed},
 };
 
@@ -26,7 +27,7 @@ impl<V> Tree<V> {
         }
     }
 
-    pub fn get<'a, 'g>(&'a self, key: &[u8], _guard: &'g Guard) -> Option<&'g V> {
+    pub fn get(&self, key: &[u8], _guard: &Guard) -> Option<&V> {
         restart_when_needed(|| unsafe {
             let mut node = self.root;
             let mut parent_node;
@@ -244,7 +245,7 @@ impl<V> Tree<V> {
                                 }
 
                                 let (second_node, second_node_key) =
-                                    node.get_second_child(node_key);
+                                    node.node::<Node4>().get_second_child(node_key);
                                 if second_node.is_entry() {
                                     parent_node.change(parent_key, second_node);
 
@@ -293,6 +294,14 @@ impl<V> Tree<V> {
             }
         });
     }
+
+    pub fn for_each_in_range<R, F>(&self, range: R, guard: &Guard, f: F)
+    where
+        R: RangeBounds<[u8]>,
+        F: FnMut(&V) -> bool,
+    {
+        todo!()
+    }
 }
 
 impl<V> Drop for Tree<V> {
@@ -325,11 +334,16 @@ mod tests {
     #[test]
     fn node_with_leaf() {
         let tree = Tree::new();
+
         tree.insert(b"abcd", 1, &pin());
         tree.insert(b"abc", 2, &pin());
         assert_eq!(tree.get(b"abc", &pin()), Some(&2));
         assert_eq!(tree.get(b"abcd", &pin()), Some(&1));
         assert_eq!(tree.get(b"ab", &pin()), None);
         assert_eq!(tree.get(b"abcde", &pin()), None);
+
+        tree.remove(b"abc", &pin());
+        assert_eq!(tree.get(b"abc", &pin()), None);
+        assert_eq!(tree.get(b"abcd", &pin()), Some(&1));
     }
 }

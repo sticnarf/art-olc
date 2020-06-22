@@ -205,13 +205,13 @@ impl NodePtr {
     }
 
     #[inline]
-    unsafe fn node<'a, N: Node>(self) -> &'a N {
+    pub unsafe fn node<'a, N: Node>(self) -> &'a N {
         debug_assert_eq!(self.meta().type_bits(), N::TYPE_BITS);
         &*(self.0 as *mut N as *const N)
     }
 
     #[inline]
-    unsafe fn node_mut<'a, N: Node>(self) -> &'a mut N {
+    pub unsafe fn node_mut<'a, N: Node>(self) -> &'a mut N {
         debug_assert_eq!(self.meta().type_bits(), N::TYPE_BITS);
         &mut *(self.0 as *mut N)
     }
@@ -702,7 +702,7 @@ pub struct Node4 {
 
 impl Node4 {
     #[inline]
-    fn get_second_child(&self, key: Option<u8>) -> (NodePtr, Option<u8>) {
+    pub fn get_second_child(&self, key: Option<u8>) -> (NodePtr, Option<u8>) {
         if let Some(key) = key {
             if !self.leaf.is_null() {
                 return (self.leaf, None);
