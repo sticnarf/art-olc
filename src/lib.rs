@@ -14,14 +14,14 @@ pub struct Tree<V> {
 }
 
 unsafe impl<V: Send> Send for Tree<V> {}
-unsafe impl<V: Sync> Sync for Tree<V> {}
+unsafe impl<V: Send + Sync> Sync for Tree<V> {}
 
 pub static RESTART_COUNT: AtomicU64 = AtomicU64::new(0);
 
 impl<V> Tree<V> {
     pub fn new() -> Tree<V> {
         Tree {
-            root: Node256::alloc(),
+            root: Box::new(Node256::new()).into(),
             _phantom: PhantomData,
         }
     }
@@ -30,13 +30,13 @@ impl<V> Tree<V> {
         restart_when_needed(|| unsafe {
             let mut node = self.root;
             let mut parent_node;
-            let mut version = node.read_lock()?;
+            let mut version = node.meta().read_lock()?;
             let mut level = 0;
             let mut optimistic_prefix_match = false;
             loop {
                 match node.check_prefix(key, level) {
                     CheckPrefixResult::NoMatch => {
-                        node.read_unlock(version)?;
+                        node.meta().read_unlock(version)?;
                         return Ok(None);
                     }
                     CheckPrefixResult::Match {
@@ -53,13 +53,13 @@ impl<V> Tree<V> {
                         level = next_level;
                         parent_node = node;
                         node = parent_node.get_child(key.get(level).cloned());
-                        parent_node.check(version)?;
+                        parent_node.meta().check_read(version)?;
 
                         if node.is_null() {
                             return Ok(None);
                         }
                         if node.is_entry() {
-                            parent_node.read_unlock(version)?;
+                            parent_node.meta().read_unlock(version)?;
                             let entry = node.to_entry();
                             if level < key.len() - 1 || optimistic_prefix_match {
                                 if entry.key() != key {
@@ -71,8 +71,8 @@ impl<V> Tree<V> {
                         level += 1;
                     }
                 }
-                let new_version = node.read_lock()?;
-                parent_node.read_unlock(version)?;
+                let new_version = node.meta().read_lock()?;
+                parent_node.meta().read_unlock(version)?;
                 version = new_version;
             }
         })
@@ -81,7 +81,6 @@ impl<V> Tree<V> {
     pub fn insert(&self, key: &[u8], value: V, guard: &Guard) {
         let mut value = ManuallyDrop::new(value);
 
-        // restart begin
         restart_when_needed(|| unsafe {
             let mut node = NodePtr::null();
             let mut next_node = self.root;
@@ -95,7 +94,7 @@ impl<V> Tree<V> {
                 parent_node = node;
                 parent_key = node_key;
                 node = next_node;
-                let version = node.read_lock()?;
+                let version = node.meta().read_lock()?;
 
                 match node.check_prefix_pessimistic(key, level)? {
                     CheckPrefixPessimisticResult::NoMatch {
@@ -103,29 +102,29 @@ impl<V> Tree<V> {
                         non_matching_key,
                         remaining_prefix,
                     } => {
-                        parent_node.upgrade_to_write_lock(parent_version)?;
-                        if let Err(restart) = node.upgrade_to_write_lock(version) {
-                            parent_node.write_unlock();
+                        parent_node.meta().upgrade_to_write_lock(parent_version)?;
+                        if let Err(restart) = node.meta().upgrade_to_write_lock(version) {
+                            parent_node.meta().write_unlock();
                             return Err(restart);
                         }
-                        let new_node =
-                            Node4::alloc_with_prefix(node.prefix_ptr(), next_level - level);
-
-                        Node4::insert(
-                            new_node,
+                        let mut new_node = Box::new(Node4::new_with_prefix(
+                            node.meta().inline_prefix(),
+                            next_level - level,
+                        ));
+                        new_node.insert(
                             key.get(next_level).cloned(),
                             EntryPtr::alloc(key, ManuallyDrop::take(&mut value)).into(),
                         );
-                        Node4::insert(new_node, Some(non_matching_key), node);
+                        new_node.insert(Some(non_matching_key), node);
 
-                        parent_node.change(parent_key, new_node);
-                        parent_node.write_unlock();
+                        parent_node.change(parent_key, new_node.into());
+                        parent_node.meta().write_unlock();
 
-                        node.set_prefix(
-                            remaining_prefix.as_ptr(),
-                            node.prefix_len() - ((next_level - level) + 1),
+                        node.meta_mut().set_prefix(
+                            &remaining_prefix,
+                            node.meta().prefix_len() - ((next_level - level) + 1),
                         );
-                        node.write_unlock();
+                        node.meta().write_unlock();
                         return Ok(());
                     }
                     CheckPrefixPessimisticResult::Match { next_level } => {
@@ -134,7 +133,7 @@ impl<V> Tree<V> {
                 }
                 node_key = key.get(level).cloned();
                 next_node = node.get_child(node_key);
-                node.check(version)?;
+                node.meta().check_read(version)?;
 
                 if next_node.is_null() {
                     node.insert_and_unlock::<V>(
@@ -150,11 +149,11 @@ impl<V> Tree<V> {
                 }
 
                 if !parent_node.is_null() {
-                    parent_node.read_unlock(parent_version)?;
+                    parent_node.meta().read_unlock(parent_version)?;
                 }
 
                 if next_node.is_entry() {
-                    node.upgrade_to_write_lock(version)?;
+                    node.meta().upgrade_to_write_lock(version)?;
 
                     let leaf = next_node.to_entry();
                     let leaf_key = leaf.key();
@@ -178,14 +177,14 @@ impl<V> Tree<V> {
                     if key.len() == leaf_key.len() && index == key.len() {
                         *leaf.value_mut() = ManuallyDrop::take(&mut value);
                     } else {
-                        let new_node =
-                            Node4::alloc_with_prefix(key.as_ptr().wrapping_add(level), prefix_len);
+                        let mut new_node =
+                            Box::new(Node4::new_with_prefix(&key[level..], prefix_len));
                         let new_entry = EntryPtr::alloc(key, ManuallyDrop::take(&mut value)).into();
-                        Node4::insert(new_node, key.get(index).cloned(), new_entry);
-                        Node4::insert(new_node, leaf_key.get(index).cloned(), next_node);
-                        node.change(Some(key[level - 1]), new_node);
+                        new_node.insert(key.get(index).cloned(), new_entry);
+                        new_node.insert(leaf_key.get(index).cloned(), next_node);
+                        node.change(Some(key[level - 1]), new_node.into());
                     }
-                    node.write_unlock();
+                    node.meta().write_unlock();
                     return Ok(());
                 }
                 level += 1;
@@ -208,11 +207,11 @@ impl<V> Tree<V> {
                 parent_node = node;
                 parent_key = node_key;
                 node = next_node;
-                let version = node.read_lock()?;
+                let version = node.meta().read_lock()?;
 
                 match node.check_prefix(key, level) {
                     CheckPrefixResult::NoMatch => {
-                        node.read_unlock(version)?;
+                        node.meta().read_unlock(version)?;
                         return Ok(());
                     }
                     CheckPrefixResult::Match { next_level, .. } => {
@@ -220,10 +219,10 @@ impl<V> Tree<V> {
                         node_key = key.get(level).cloned();
                         next_node = node.get_child(node_key);
 
-                        node.check(version)?;
+                        node.meta().check_read(version)?;
 
                         if next_node.is_null() {
-                            node.read_unlock(version)?;
+                            node.meta().read_unlock(version)?;
                             return Ok(());
                         }
 
@@ -236,11 +235,11 @@ impl<V> Tree<V> {
                             }
 
                             let leaf_count = !node.get_child(None).is_null() as usize;
-                            let all_count = node.child_count() + leaf_count;
+                            let all_count = node.meta().child_count() + leaf_count;
                             if all_count == 2 && !parent_node.is_null() {
-                                parent_node.upgrade_to_write_lock(parent_version)?;
-                                if let Err(restart) = node.upgrade_to_write_lock(version) {
-                                    parent_node.write_unlock();
+                                parent_node.meta().upgrade_to_write_lock(parent_version)?;
+                                if let Err(restart) = node.meta().upgrade_to_write_lock(version) {
+                                    parent_node.meta().write_unlock();
                                     return Err(restart);
                                 }
 
@@ -249,26 +248,28 @@ impl<V> Tree<V> {
                                 if second_node.is_entry() {
                                     parent_node.change(parent_key, second_node);
 
-                                    parent_node.write_unlock();
-                                    node.write_unlock_obsolete();
+                                    parent_node.meta().write_unlock();
+                                    node.meta().write_unlock_obsolete();
                                     guard.defer(move || {
                                         node.dealloc();
                                     });
                                 } else {
-                                    if let Err(restart) = second_node.write_lock() {
-                                        node.write_unlock();
-                                        parent_node.write_unlock();
+                                    if let Err(restart) = second_node.meta().write_lock() {
+                                        node.meta().write_unlock();
+                                        parent_node.meta().write_unlock();
                                         return Err(restart);
                                     }
 
                                     parent_node.change(parent_key, second_node);
-                                    parent_node.write_unlock();
+                                    parent_node.meta().write_unlock();
 
-                                    // if second_node is not entry, it has a key, so we can unwrap
-                                    second_node.add_prefix_before(node, second_node_key.unwrap());
-                                    second_node.write_unlock();
+                                    // if second_node is not an entry, it must have a key, so we can unwrap
+                                    second_node
+                                        .meta_mut()
+                                        .add_prefix_before(node, second_node_key.unwrap());
+                                    second_node.meta().write_unlock();
 
-                                    node.write_unlock_obsolete();
+                                    node.meta().write_unlock_obsolete();
                                     guard.defer(move || {
                                         node.dealloc();
                                     });
@@ -320,71 +321,15 @@ fn restart_when_needed<T>(mut f: impl FnMut() -> Result<T, NeedRestart>) -> T {
 mod tests {
     use super::*;
     use crossbeam_epoch::pin;
-    use rand::prelude::*;
-    use std::collections::HashMap;
 
     #[test]
-    fn single_thread() {
-        let mut rng = StdRng::seed_from_u64(114514);
+    fn node_with_leaf() {
         let tree = Tree::new();
-        let mut ans = HashMap::new();
-        let mut buf = [0u8; 1024];
-        for _ in 0..10_000 {
-            let base = (2.0f64.ln() / 32.0).exp();
-            let len = (rng.next_u32() as f64).log(base) as usize;
-            rng.fill_bytes(&mut buf[..len]);
-            let value = rng.next_u32();
-
-            ans.insert(buf[..len].to_vec(), value);
-            if value % 2 == 0 {
-                let guard = pin();
-                tree.insert(&buf[..len], value, &guard);
-            }
-        }
-
-        for (key, value) in &ans {
-            let guard = pin();
-            let res = tree.get(key, &guard);
-            if *value % 2 == 0 {
-                assert_eq!(res, Some(value));
-            } else {
-                assert_eq!(res, None);
-            }
-        }
-
-        for (key, value) in &ans {
-            if *value % 4 == 0 {
-                let guard = pin();
-                tree.remove(key, &guard);
-            }
-        }
-
-        for (key, value) in &ans {
-            let guard = pin();
-            let res = tree.get(key, &guard);
-            if *value % 4 == 2 {
-                assert_eq!(res, Some(value));
-            } else {
-                assert_eq!(res, None);
-            }
-        }
-
-        for (key, value) in &ans {
-            if *value % 4 == 3 {
-                let guard = pin();
-                tree.insert(key, *value, &guard);
-            }
-        }
-
-        for (key, value) in &ans {
-            let guard = pin();
-            let res = tree.get(key, &guard);
-            let rem = *value % 4;
-            if rem == 2 || rem == 3 {
-                assert_eq!(res, Some(value));
-            } else {
-                assert_eq!(res, None);
-            }
-        }
+        tree.insert(b"abcd", 1, &pin());
+        tree.insert(b"abc", 2, &pin());
+        assert_eq!(tree.get(b"abc", &pin()), Some(&2));
+        assert_eq!(tree.get(b"abcd", &pin()), Some(&1));
+        assert_eq!(tree.get(b"ab", &pin()), None);
+        assert_eq!(tree.get(b"abcde", &pin()), None);
     }
 }
