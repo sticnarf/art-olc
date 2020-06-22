@@ -47,6 +47,7 @@ fn insert_art_multithread(words: &[String]) -> Arc<Tree<()>> {
             drop(wg);
         });
     }
+    wg.wait();
     tree
 }
 
@@ -73,6 +74,7 @@ fn insert_btree_multithread(words: &[String]) -> Arc<Mutex<BTreeSet<String>>> {
             drop(wg);
         });
     }
+    wg.wait();
     tree
 }
 
@@ -99,6 +101,7 @@ fn insert_skiplist_multithread(words: &[String]) -> Arc<SkipSet<String>> {
             drop(wg);
         });
     }
+    wg.wait();
     list
 }
 
