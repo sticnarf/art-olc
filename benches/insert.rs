@@ -9,100 +9,101 @@ use art_olc::Tree;
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
 use crossbeam_epoch::pin;
 use crossbeam_skiplist::SkipSet;
-use crossbeam_utils::sync::WaitGroup;
+use crossbeam_utils::thread;
 use rand::prelude::*;
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeSet, HashSet},
     fs::File,
     io::{BufRead, BufReader},
-    sync::{Arc, Mutex},
-    thread,
+    mem,
+    sync::Mutex,
     time::{Duration, Instant},
 };
 
 const THREAD_NUM: usize = 8;
 
-fn insert_art(words: &[String]) -> Tree<()> {
-    let tree = Tree::new();
+fn insert_art(words: Vec<String>) -> Tree<()> {
+    let set = Tree::new();
     for word in words {
         let guard = pin();
-        tree.insert(word.as_bytes(), (), &guard);
+        set.insert(word.as_bytes(), (), &guard);
     }
-    tree
+    set
 }
 
-fn insert_art_multithread(words: &[String]) -> Arc<Tree<()>> {
-    let tree = Arc::new(Tree::new());
-    let wg = WaitGroup::new();
+fn insert_art_multithread(mut words: Vec<String>) -> Tree<()> {
+    let set = Tree::new();
     let chunk_size = words.len() / THREAD_NUM + 1;
-    for chunk in words.chunks(chunk_size) {
-        let tree = tree.clone();
-        let wg = wg.clone();
-        let chunk = unsafe { &*(chunk as *const [String]) };
-        thread::spawn(move || {
-            for word in chunk {
-                let guard = pin();
-                tree.insert(word.as_bytes(), (), &guard);
-            }
-            drop(wg);
-        });
-    }
-    wg.wait();
-    tree
+    thread::scope(|s| {
+        for chunk in words.chunks_mut(chunk_size) {
+            s.spawn(|_| {
+                for word in chunk {
+                    let guard = pin();
+                    set.insert(word.as_bytes(), (), &guard);
+                }
+            });
+        }
+    })
+    .unwrap();
+    set
 }
 
-fn insert_btree(words: &[String]) -> BTreeSet<String> {
-    let mut tree = BTreeSet::new();
+fn insert_btree(words: Vec<String>) -> BTreeSet<String> {
+    let mut set = BTreeSet::new();
     for word in words {
-        tree.insert(word.to_owned());
+        set.insert(word);
     }
-    tree
+    set
 }
 
-fn insert_btree_multithread(words: &[String]) -> Arc<Mutex<BTreeSet<String>>> {
-    let tree = Arc::new(Mutex::new(BTreeSet::new()));
-    let wg = WaitGroup::new();
+fn insert_btree_multithread(mut words: Vec<String>) -> Mutex<BTreeSet<String>> {
+    let set = Mutex::new(BTreeSet::new());
     let chunk_size = words.len() / THREAD_NUM + 1;
-    for chunk in words.chunks(chunk_size) {
-        let tree = tree.clone();
-        let wg = wg.clone();
-        let chunk = unsafe { &*(chunk as *const [String]) };
-        thread::spawn(move || {
-            for word in chunk {
-                tree.lock().unwrap().insert(word.to_owned());
-            }
-            drop(wg);
-        });
-    }
-    wg.wait();
-    tree
+    thread::scope(|s| {
+        for chunk in words.chunks_mut(chunk_size) {
+            s.spawn(|_| {
+                for word in chunk {
+                    set.lock()
+                        .unwrap()
+                        .insert(mem::replace(word, String::new()));
+                }
+            });
+        }
+    })
+    .unwrap();
+    set
 }
 
-fn insert_skiplist(words: &[String]) -> SkipSet<String> {
+fn insert_hashset(words: Vec<String>) -> HashSet<String> {
+    let mut set = HashSet::new();
+    for word in words {
+        set.insert(word);
+    }
+    set
+}
+
+fn insert_skiplist(words: Vec<String>) -> SkipSet<String> {
     let list = SkipSet::new();
     for word in words {
-        list.insert(word.to_owned());
+        list.insert(word);
     }
     list
 }
 
-fn insert_skiplist_multithread(words: &[String]) -> Arc<SkipSet<String>> {
-    let list = Arc::new(SkipSet::new());
-    let wg = WaitGroup::new();
+fn insert_skiplist_multithread(mut words: Vec<String>) -> SkipSet<String> {
+    let set = SkipSet::new();
     let chunk_size = words.len() / THREAD_NUM + 1;
-    for chunk in words.chunks(chunk_size) {
-        let list = list.clone();
-        let wg = wg.clone();
-        let chunk = unsafe { &*(chunk as *const [String]) };
-        thread::spawn(move || {
-            for word in chunk {
-                list.insert(word.to_owned());
-            }
-            drop(wg);
-        });
-    }
-    wg.wait();
-    list
+    thread::scope(|s| {
+        for chunk in words.chunks_mut(chunk_size) {
+            s.spawn(|_| {
+                for word in chunk {
+                    set.insert(mem::replace(word, String::new()));
+                }
+            });
+        }
+    })
+    .unwrap();
+    set
 }
 
 fn bench_insert(c: &mut Criterion) {
@@ -121,6 +122,7 @@ fn bench_insert(c: &mut Criterion) {
             b.iter_custom(|iter| {
                 let mut elapsed = Duration::default();
                 for _ in 0..iter {
+                    let words = words.clone();
                     let start = Instant::now();
                     let tree = insert_art(words);
                     elapsed += start.elapsed();
@@ -137,6 +139,7 @@ fn bench_insert(c: &mut Criterion) {
             b.iter_custom(|iter| {
                 let mut elapsed = Duration::default();
                 for _ in 0..iter {
+                    let words = words.clone();
                     let start = Instant::now();
                     let tree = insert_art_multithread(words);
                     elapsed += start.elapsed();
@@ -153,6 +156,7 @@ fn bench_insert(c: &mut Criterion) {
             b.iter_custom(|iter| {
                 let mut elapsed = Duration::default();
                 for _ in 0..iter {
+                    let words = words.clone();
                     let start = Instant::now();
                     let tree = insert_btree(words);
                     elapsed += start.elapsed();
@@ -169,8 +173,27 @@ fn bench_insert(c: &mut Criterion) {
             b.iter_custom(|iter| {
                 let mut elapsed = Duration::default();
                 for _ in 0..iter {
+                    let words = words.clone();
                     let start = Instant::now();
                     let tree = insert_btree_multithread(words);
+                    elapsed += start.elapsed();
+                    drop(tree);
+                }
+                elapsed
+            })
+        },
+    );
+    group.bench_with_input(
+        BenchmarkId::new("HashSet", "single-thread"),
+        &words,
+        |b, words| {
+            b.iter_custom(|iter| {
+                let mut elapsed = Duration::default();
+                for _ in 0..iter {
+                    let words = words.clone();
+                    let words = words.clone();
+                    let start = Instant::now();
+                    let tree = insert_hashset(words);
                     elapsed += start.elapsed();
                     drop(tree);
                 }
@@ -185,6 +208,7 @@ fn bench_insert(c: &mut Criterion) {
             b.iter_custom(|iter| {
                 let mut elapsed = Duration::default();
                 for _ in 0..iter {
+                    let words = words.clone();
                     let start = Instant::now();
                     let tree = insert_skiplist(words);
                     elapsed += start.elapsed();
@@ -201,6 +225,7 @@ fn bench_insert(c: &mut Criterion) {
             b.iter_custom(|iter| {
                 let mut elapsed = Duration::default();
                 for _ in 0..iter {
+                    let words = words.clone();
                     let start = Instant::now();
                     let tree = insert_skiplist_multithread(words);
                     elapsed += start.elapsed();
