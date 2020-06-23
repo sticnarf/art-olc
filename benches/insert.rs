@@ -25,8 +25,7 @@ const THREAD_NUM: usize = 8;
 fn insert_art(words: Vec<String>) -> Tree<()> {
     let set = Tree::new();
     for word in words {
-        let guard = pin();
-        set.insert(word.as_bytes(), (), &guard);
+        set.insert(word.as_bytes(), (), &pin());
     }
     set
 }
@@ -38,8 +37,7 @@ fn insert_art_multithread(mut words: Vec<String>) -> Tree<()> {
         for chunk in words.chunks_mut(chunk_size) {
             s.spawn(|_| {
                 for word in chunk {
-                    let guard = pin();
-                    set.insert(word.as_bytes(), (), &guard);
+                    set.insert(word.as_bytes(), (), &pin());
                 }
             });
         }

@@ -159,7 +159,7 @@ impl<V> Tree<V> {
                     let leaf = next_node.to_entry();
                     let leaf_key = leaf.key();
 
-                    level += 1;
+                    level += node_key.is_some() as usize;
                     let mut prefix_len = 0;
                     let mut index;
                     loop {
@@ -298,8 +298,16 @@ impl<V> Tree<V> {
     pub fn for_each_in_range<R, F>(&self, range: R, guard: &Guard, f: F)
     where
         R: RangeBounds<[u8]>,
-        F: FnMut(&V) -> bool,
+        F: FnMut(&[u8], &V) -> bool,
     {
+        unsafe fn for_each_in_node<V>(node: NodePtr, mut f: impl FnMut(&[u8], &V) -> bool) -> bool {
+            if node.is_entry() {
+                let entry = node.to_entry();
+                f(entry.key(), entry.value_mut())
+            } else {
+                todo!()
+            }
+        }
         todo!()
     }
 }
@@ -345,5 +353,18 @@ mod tests {
         tree.remove(b"abc", &pin());
         assert_eq!(tree.get(b"abc", &pin()), None);
         assert_eq!(tree.get(b"abcd", &pin()), Some(&1));
+    }
+
+    #[test]
+    fn insert_same() {
+        let tree = Tree::new();
+
+        tree.insert(b"abcd", 1, &pin());
+        tree.insert(b"abc", 2, &pin());
+        assert_eq!(tree.get(b"abcd", &pin()), Some(&1));
+        assert_eq!(tree.get(b"abc", &pin()), Some(&2));
+
+        tree.insert(b"abc", 3, &pin());
+        assert_eq!(tree.get(b"abc", &pin()), Some(&3));
     }
 }

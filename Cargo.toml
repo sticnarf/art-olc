@@ -19,3 +19,11 @@ jemallocator = "0.3.2"
 [[bench]]
 name = "insert"
 harness = false
+
+[[bench]]
+name = "get"
+harness = false
+
+[[bench]]
+name = "insert_get"
+harness = false

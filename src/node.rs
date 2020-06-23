@@ -356,11 +356,6 @@ impl NodePtr {
     }
 
     #[inline]
-    pub unsafe fn get_second_child(self, node_key: Option<u8>) -> (NodePtr, Option<u8>) {
-        self.node::<Node4>().get_second_child(node_key)
-    }
-
-    #[inline]
     pub unsafe fn change(self, parent_key: Option<u8>, new_node: NodePtr) {
         match self.meta().type_bits() {
             Node4::TYPE_BITS => self.node_mut::<Node4>().change(parent_key, new_node),
@@ -593,6 +588,8 @@ pub trait Node: Sized {
     fn get_any_child(&self) -> NodePtr;
 
     fn get_child(&self, node_key: Option<u8>) -> NodePtr;
+
+    // fn get_children(&self, )
 
     fn change(&mut self, key: Option<u8>, new_node: NodePtr);
 
